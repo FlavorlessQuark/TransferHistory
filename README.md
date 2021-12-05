@@ -13,8 +13,9 @@ Fetch history for ETH and BSC contract
 ```
 
 **Takes** :
-    - chain : "BSC" or "ETH"
-    - an array of contracts dictionaries of the format :
+
+   - chain : "BSC" or "ETH"
+   - an array of contracts dictionaries of the format :
 
 ```
     address : contract_address,
@@ -26,7 +27,8 @@ Fetch history for ETH and BSC contract
 ```
 
 **Returns** :
-    - Dictionary of the format:
+
+- Dictionary of the format:
 ```
 {
     contractAddress : [
