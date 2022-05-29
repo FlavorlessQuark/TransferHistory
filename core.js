@@ -179,9 +179,57 @@ const get_AlltransfersToBlock = async (contract, to_block) =>
     return transfers;
 }
 
+const parseOwners = (transfers) =>
+{
+    let owners = {}
+
+    for (let address of Object.keys(transfers))
+    {
+        owners[address] = {}
+        for (let transfer of transfers[address])
+        {
+            if (!owners[address][transfer.transfer.to])
+                owners[address][transfer.transfer.to] = new Set()
+                // console.log(transfer, transfer.transfer, transfer.transfer.token)
+            for (let token of transfer.transfer.token)
+            {
+                if (owners[address][transfer.transfer.from])
+                    owners[address][transfer.transfer.from].delete(token)
+                owners[address][transfer.transfer.to].add(token)
+            }
+        }
+    }
+    // console.log(owners)
+    return owners
+}
+
+const get_history = async(contract, chain) =>
+{
+    console.log("history for ", contract.address)
+    const current_block = chain === "BSC" ? await BSCprovider.getBlockNumber() : await ETHprovider.getBlockNumber();
+    let sorted = [];
+    let transfers = await get_AlltransfersToBlock(contract, current_block);
+
+    for (let obj of transfers)
+    {
+        if (obj.length > 0)
+        {
+            sorted = sorted.concat(obj)
+        }
+    }
+    sorted.sort((a, b) =>{ return a.block - b.block})
+    let dic = {}
+    dic[contract.address]  = sorted
+    let owners = parseOwners(dic)
+    return owners
+}
+
+
 module.exports =
 {
     get_AlltransfersToBlock,
     getLogs,
-    Transfers_FromBlock
+    Transfers_FromBlock,
+    parseOwners,
+    get_history
 }
