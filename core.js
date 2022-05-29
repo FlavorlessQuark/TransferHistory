@@ -1,164 +1,187 @@
-const dotenv = require('dotenv');
-dotenv.config();
+const { utils, providers, BigNumber } = require("ethers");
+const Axios = require("axios");
 
-const { utils } = require("ethers");
-const ETH_NETWORK =  process.env.ETH_PROVIDER;
-const BSC_NETWORK =  process.env.BSC_PROVIDER;
-const BSCprovider = new providers.getDefaultProvider(BSC_NETWORK);
-const ETHprovider = new providers.getDefaultProvider(ETH_NETWORK);
+const {BSC_API, ETH_API, ethkey, bsckey, apiKey} = require("../constants")
 
-const Transfers_FromBlock = async(from_block, contracts, to_block) =>
-{
-    let return_data =  { "transactionCount": 0, "transfers": { } };
-    for (contract of contracts)
+let next_query_time = 0
+const getLogs = async (from_block, to_block, contract, topic, chain) => {
+
+    try {
+
+        const r = await Axios.post((chain == "ETH" ? ETH_API : BSC_API),
+            {
+                jsonrpc: '2.0',
+                id: (chain == "ETH" ? 74 : "getblock.io"),
+                method: 'eth_getLogs',
+                params : [{
+                    "fromBlock": "0x" + from_block.toString(16),
+                    "toBlock": "0x" + to_block.toString(16),
+                    "address": contract,
+                    "topics" : [topic]
+                    }]
+            },
+            {
+                headers : {
+                    'x-api-key': apiKey,
+                    'Content-Type': 'application/json-rpc',
+                    'Accept': 'application/json-rpc'
+                },
+            })
+
+        return r.data.result;
+    }
+    catch (err)
     {
+        console.log("failed to query blockchain: ",  err.response.data, "For", chain, "contract ", contract );
+        return null
+    }
+}
+
+const Transfers_FromBlock = async(from_block, contract, to_block, ) =>
+{
+    try
+    {
+        let transactions = [];
         if (contract.type == "721" || contract.type == "20")
         {
-            let filter = contract.Object.filters.Transfer(null, null)
-            transactions = await contract.Object.queryFilter(filter, from_block, to_block);
-        }
-        else
-        {
-            let filter = contract.Object.filters.TransferSingle(null, null)
-            transactions = await contract.Object.queryFilter(filter, from_block, to_block);
-            filter = contract.Object.filters.TransferBatch(null, null)
-            transactions = [...transactions, ...await contract.Object.queryFilter(filter, from_block, to_block)];
-        }
-        return_data.transactionCount += transactions.length;
-        return_data.transfers[contract.address] = {"count" : 0, "hashes": [], "iface": null, "provider": null};
-        return_data.transfers[contract.address].count = transactions.length;
-        return_data.transfers[contract.address].hashes = transactions.map((tr) => {return tr.transactionHash});
-        return_data.transfers[contract.address].hashes = new Set(return_data.transfers[contract.address].hashes)
-        return_data.transfers[contract.address].iface = contract.interface;
-        return_data.transfers[contract.address].provider = contract.provider;
-    }
-    return return_data
-}
-
-const decode_Transactions = async(transactions, interface, provider, address) =>
-{
-    let parsed = [];
-    let promises = []
-    for(hash of transactions)
-    {
-        promises.push( (await provider.getTransaction(hash)).wait())
-    }
-    Promise.all(promises).then(async (hash) =>
-    {
-        for (let res of hash)
-        {
-
-        try
-            {
-                let transfer = {"contract": address}
-                let decoded = [];
-                transfer["block"] = res.logs[0].blockNumber;
-                transfer["transfers"] = []
-                for (log of res.logs)
-                {
-                    if (log.address == address)
-                    {
-                        try
-                        {
-                            decoded = (interface.parseLog(log))
-                            if (decoded.name.startsWith("Transfer"))
-                            {
-                                let transaction = {}
-                                transaction["from"] = decoded.args.from;
-                                transaction["to"] = decoded.args.to;
-                                if (decoded.args.tokenId)
-                                    transaction["token"] = (decoded.args.tokenId.toNumber());
-                                else if (decoded.args.id)
-                                    transaction["token"] = (decoded.args.id.toNumber());
-                                else if (decoded.args.value)
-                                    transaction["value"] = (utils.formatEther(decoded.args.value.toString()));
-                                transfer["transfers"].push(transaction)
-                            }
-                        }
-                        catch(err)
-                        {
-                            console.log("Error parsing logs", err,log, transfer)
-                        }
+            const logs = await getLogs(from_block, to_block, contract.address, "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", contract.chain)
+            if (!logs)
+                return {"success" : false, from_block, to_block};
+            transactions = logs.map(log => {
+                return {
+                    block: Number(log.blockNumber),
+                    transfer: {
+                        from: "0x" + log.topics[1].slice(26),
+                        to: "0x" + log.topics[2].slice(26),
+                        token: [Number(log.topics[3])]
                     }
                 }
-                parsed.push(transfer);
-            }
-            catch(err)
-            {
-                console.log("Error on transaction", err, hash,)
-                throw "Error on transaction"
-            }
+            })
         }
-    })
-    return parsed;
+        else if (contract.type == "1155")
+        {
+            // TransferSingle
+            let logs = await getLogs(from_block, to_block, contract.address, "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62", contract.chain)
+            transactions = logs.map(log => {
+                const [id, value] = utils.defaultAbiCoder.decode(
+                    ['uint256', 'uint256'],
+                    log.data
+                )
+                return {
+                    block: Number(log.blockNumber),
+                    transfer: {
+                        from: "0x" + log.topics[2].slice(26),
+                        to: "0x" + log.topics[3].slice(26),
+                        token: [id.toNumber()],
+                    }
+                }
+            })
+            // TransferBatch
+            logs = await getLogs(from_block, to_block, contract.address, "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb", contract.chain)
+            if (!logs)
+                return {"success" : false, from_block, to_block};
+            transactions2 = logs.map(log => {
+                try{
+
+                const [ids, values] = utils.defaultAbiCoder.decode(
+                    ['uint256[]', 'uint256[]'],
+                    log.data
+                )
+                return {
+                    block: Number(log.blockNumber),
+                    transfer: {
+                        from: "0x" + log.topics[2].slice(26),
+                        to: "0x" + log.topics[3].slice(26),
+                        token: ids.map((e) => e.toNumber()),
+                    }
+                }
+                }
+                catch(err)
+                {
+                    console.log("ERROR", err, log.data)
+                }
+            })
+            transactions = transactions.concat(transactions2);
+        }
+
+        return {"success" : true, transactions};
+    }
+    catch(err)
+    {
+        console.log("Failed to get transfers from", from_block, "to", to_block, err)
+        return {"success" : false, from_block, to_block};
+    }
 }
 
-const get_AllTransfersToBlock = (contracts, to_block) =>
+const tryAgain = async (failed, contract) =>
 {
-    let transfer = []
-    let block = contracts.reduce((curr, next) => curr.creationBlock < next.creationBlock ? curr.creationBlock : next.creationBlock)
+    let transfers = []
+    let failedAgain = [];
+    for (let f of failed)
+    {
+        console.log("ALL from", f[0], "to", f[1])
+        for (;;) {
+            if (new Date().getTime() >= next_query_time) {
+                let result = await Transfers_FromBlock(f[0], contract, f[1])
+                if (result.success)
+                    transfers.push(result.transactions)
+                else
+                    failedAgain.push([result.from_block, result.to_block])
+                next_query_time = new Date().getTime() + 200;
+                break ;
+            }
+        }
+    }
+    return {transfers, failedAgain}
+}
+
+const get_AlltransfersToBlock = async (contract, to_block) =>
+{
+    // console.log(contract, to_block)
+    let transfers = []
+    let failed = []
+    let block = contract.creationBlock;
     let old = block;
-
-    console.log(block)
-
-
-    for (; ;)
+        // console.log("HI", block, to_block)
+    while (block < to_block)
     {
-        let batch = [];
-        contracts.map((item) => {item.creationBlock <= block ? batch.push(item) : null})
+        // console.log("HI")
         block += 4999
-        transfer.push(Transfers_FromBlock(old, batch, block))
-        old = block
         if (block >= to_block)
-            break ;
-    }
-    return transfer;
-}
-
-const get_History = async(contracts, chain) =>
-{
-    let current_block = chain == "BSC" ? await BSCprovider.getBlockNumber() : await ETHprovider.getBlockNumber();
-    let promises = get_AllTransfersToBlock(contracts, current_block)
-    let res  = await Promise.all(promises)
-    // {
-        let returnData = {};
-        let data = res.flatMap((e) => {return e})
-        let tokens = {}
-        let decoded = []
-        for (let t of data)
-        {
-            if (t.transactionCount > 0)
-            {
-                for (let address of Object.keys(t.transfers))
+            block = to_block
+        console.log("ALL from", old, "to", block)
+        for (;;) {
+            if (new Date().getTime() >= next_query_time) {
+                let result = await Transfers_FromBlock(old, contract, block)
+                if (result.success === true)
+                     transfers.push(result.transactions)
+                else
                 {
-                    if (!tokens[address])
-                        tokens[address] = {}
-                    if (t.transfers[address]["count"])
-                    {
-                        decoded.push(decode_Transactions(t.transfers[address]["hashes"],t.transfers[address]["iface"],  t.transfers[address]["provider"], address))
-                    }
+                    failed.push([result.from_block, result.to_block])
+                    break ;
                 }
+                next_query_time = new Date().getTime() + 150;
+                break ;
             }
         }
-        let stuff = await Promise.all(decoded)
-        // {
-            for (let arr of stuff)
-            {
-                for (let dic of arr)
-                {
-                    if (!returnData[dic.contract])
-                        returnData[dic.contract] = []
-                    returnData[dic.contract].push({"block": dic.block,"trnasfers": dic.transfers})
+        old = block;
+    }
 
-                }
-            }
-    return returnData
+    while (failed.length > 0)
+    {
+        console.log("failed", failed.length, "Trying again")
+        let result = await tryAgain(failed, contract);
+
+        failed = result.failedAgain
+        transfers = [...transfers,...result.transfers]
+    }
+    // console.log("TRANSFERS", transfers)
+    return transfers;
 }
 
 module.exports =
 {
-    Transfers_FromBlock,
-    get_AllTransfersToBlock,
-    decode_Transactions,
-    get_History,
+    get_AlltransfersToBlock,
+    getLogs,
+    Transfers_FromBlock
 }
